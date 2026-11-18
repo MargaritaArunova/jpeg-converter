@@ -1,0 +1,25 @@
+# Директории сборки
+build/
+cmake-build-*/
+
+# CLion
+.idea/
+
+# Скомпилированные бинарники
+*.o
+*.a
+*.so
+*.dylib
+jpeg_converter
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# macOS
+.DS_Store
