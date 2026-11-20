@@ -1,58 +1,60 @@
 #include "jpeg/block_processor.h"
 #include <algorithm>
+#include <cmath>
 
 namespace jpeg {
 
-// Стандартный порядок зигзаг-обхода блока 8x8 (JPEG, ISO 10918-1).
-// Обход начинается с DC-коэффициента (верхний левый угол) и идёт по диагоналям,
-// группируя низкочастотные коэффициенты в начале массива. Это повышает эффективность
-// последующего RLE-кодирования: длинные серии нулей чаще встречаются в конце.
-const int ZIGZAG_ORDER[64] = {
-     0,  1,  5,  6, 14, 15, 27, 28,
-     2,  4,  7, 13, 16, 26, 29, 42,
-     3,  8, 12, 17, 25, 30, 41, 43,
-     9, 11, 18, 24, 31, 40, 44, 53,
-    10, 19, 23, 32, 39, 45, 52, 54,
-    20, 22, 33, 38, 46, 51, 55, 60,
-    21, 34, 37, 47, 50, 56, 59, 61,
-    35, 36, 48, 49, 57, 58, 62, 63
-};
-
-Block extract_block(const Image& img, int block_row, int block_col, int channel) {
-    Block block;
-    for (int r = 0; r < 8; ++r) {
-        for (int c = 0; c < 8; ++c) {
-            // Пограничные блоки: пиксели за краем изображения заменяются ближайшим краевым пикселем.
-            int row = std::min(block_row * 8 + r, img.height - 1);
-            int col = std::min(block_col * 8 + c, img.width  - 1);
-            // Уровневый сдвиг на -128: центрирует значения вокруг нуля перед ДКП (стандарт JPEG).
-            block[r * 8 + c] = static_cast<float>(img.at(row, col, channel)) - 128.f;
+std::vector<int> make_zigzag_order(int n) {
+    // Обход по диагоналям r+c = s; направление чередуется: чётные диагонали идут
+    // снизу вверх, нечётные — сверху вниз. Для n = 8 даёт таблицу из стандарта ISO 10918-1.
+    std::vector<int> order(static_cast<size_t>(n) * n);
+    int index = 0;
+    for (int s = 0; s <= 2 * n - 2; ++s) {
+        const int r_min = std::max(0, s - n + 1);
+        const int r_max = std::min(s, n - 1);
+        if (s % 2 == 0) {
+            for (int r = r_max; r >= r_min; --r) order[static_cast<size_t>(r) * n + (s - r)] = index++;
+        } else {
+            for (int r = r_min; r <= r_max; ++r) order[static_cast<size_t>(r) * n + (s - r)] = index++;
         }
     }
-    return block;
+    return order;
+}
+
+void extract_block(const Image& img, int block_row, int block_col, int channel,
+                   int n, Block& out) {
+    for (int r = 0; r < n; ++r) {
+        // Пограничные блоки: пиксели за краем изображения заменяются ближайшим краевым пикселем.
+        const int row = std::min(block_row * n + r, img.height - 1);
+        for (int c = 0; c < n; ++c) {
+            const int col = std::min(block_col * n + c, img.width - 1);
+            // Уровневый сдвиг на -128: центрирует значения вокруг нуля перед ДКП (стандарт JPEG).
+            out[static_cast<size_t>(r) * n + c] = static_cast<float>(img.at(row, col, channel)) - 128.f;
+        }
+    }
 }
 
 void write_block(Image& img, int block_row, int block_col, int channel,
-                 const Block& block) {
-    for (int r = 0; r < 8; ++r) {
-        for (int c = 0; c < 8; ++c) {
-            int row = block_row * 8 + r;
-            int col = block_col * 8 + c;
-            if (row >= img.height || col >= img.width) continue;
+                 int n, const Block& block) {
+    for (int r = 0; r < n; ++r) {
+        const int row = block_row * n + r;
+        if (row >= img.height) break;
+        for (int c = 0; c < n; ++c) {
+            const int col = block_col * n + c;
+            if (col >= img.width) break;
             // Обратный уровневый сдвиг (+128) и зажим в допустимый диапазон uint8_t.
-            float val = block[r * 8 + c] + 128.f;
+            const float val = block[static_cast<size_t>(r) * n + c] + 128.f;
             img.at(row, col, channel) =
                 static_cast<uint8_t>(std::clamp(std::round(val), 0.f, 255.f));
         }
     }
 }
 
-std::array<int16_t, 64> zigzag_scan(const Block& quantized_block) {
-    std::array<int16_t, 64> out;
-    for (int i = 0; i < 64; ++i) {
-        out[ZIGZAG_ORDER[i]] = static_cast<int16_t>(quantized_block[i]);
+void zigzag_scan(const Block& block, const std::vector<int>& order,
+                 std::vector<int16_t>& out) {
+    for (size_t i = 0; i < block.size(); ++i) {
+        out[order[i]] = static_cast<int16_t>(block[i]);
     }
-    return out;
 }
 
 } // namespace jpeg

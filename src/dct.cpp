@@ -1,72 +1,74 @@
 #include "jpeg/dct.h"
 #include <cmath>
+#include <stdexcept>
 
 namespace jpeg {
 
-static constexpr int N = 8;
-static const double PI = std::acos(-1.0);
+DctPlan::DctPlan(int n) : n_(n) {
+    if (n < 1 || n > kMaxBlockSize) {
+        throw std::invalid_argument("DctPlan: размер блока вне диапазона [1, kMaxBlockSize]");
+    }
+    const double pi = std::acos(-1.0);
+    forward_.resize(static_cast<size_t>(n) * n);
+    inverse_.resize(static_cast<size_t>(n) * n);
 
-// Ортонормальный масштабный коэффициент: 1/sqrt(N) для k=0, sqrt(2/N) для остальных.
-// Обеспечивает обратимость: IDCT(DCT(x)) == x без дополнительных множителей.
-static inline double dct_scale(int k) {
-    return (k == 0) ? 1.0 / std::sqrt(static_cast<double>(N))
-                    : std::sqrt(2.0 / N);
+    for (int k = 0; k < n; ++k) {
+        // Ортонормальный масштаб: обеспечивает обратимость без дополнительных множителей.
+        const double scale = (k == 0) ? 1.0 / std::sqrt(static_cast<double>(n))
+                                      : std::sqrt(2.0 / n);
+        for (int i = 0; i < n; ++i) {
+            const double v = scale * std::cos(pi * (2 * i + 1) * k / (2.0 * n));
+            forward_[static_cast<size_t>(k) * n + i] = v;
+            inverse_[static_cast<size_t>(i) * n + k] = v;
+        }
+    }
 }
 
-// Одномерное прямое ДКП-II для 8 значений, расположенных в массиве data с шагом step.
-// Преобразует пространственные отсчёты в частотные коэффициенты.
-static void dct1d(float* data, int step) {
-    double tmp[N];
-    for (int k = 0; k < N; ++k) {
+// Одномерное прямое ДКП-II для n значений, расположенных в data с шагом step.
+static void dct1d(const DctPlan& plan, float* data, int step) {
+    const int n = plan.size();
+    const double* basis = plan.forward();
+    double tmp[kMaxBlockSize];
+
+    for (int k = 0; k < n; ++k) {
+        const double* row = basis + static_cast<size_t>(k) * n;
         double sum = 0.0;
-        for (int n = 0; n < N; ++n) {
-            sum += data[n * step] * std::cos(PI * (2 * n + 1) * k / (2.0 * N));
-        }
-        tmp[k] = dct_scale(k) * sum;
+        for (int i = 0; i < n; ++i) sum += data[i * step] * row[i];
+        tmp[k] = sum;
     }
-    for (int k = 0; k < N; ++k) data[k * step] = static_cast<float>(tmp[k]);
+    for (int k = 0; k < n; ++k) data[k * step] = static_cast<float>(tmp[k]);
 }
 
-// Одномерное обратное ДКП (ДКП-III) для 8 значений с шагом step.
-// Восстанавливает пространственные значения из частотных коэффициентов.
-static void idct1d(float* data, int step) {
-    double tmp[N];
-    for (int n = 0; n < N; ++n) {
-        double sum = dct_scale(0) * data[0];
-        for (int k = 1; k < N; ++k) {
-            sum += dct_scale(k) * data[k * step]
-                   * std::cos(PI * (2 * n + 1) * k / (2.0 * N));
-        }
-        tmp[n] = sum;
+// Одномерное обратное ДКП (ДКП-III) для n значений с шагом step.
+static void idct1d(const DctPlan& plan, float* data, int step) {
+    const int n = plan.size();
+    const double* basis = plan.inverse();
+    double tmp[kMaxBlockSize];
+
+    for (int i = 0; i < n; ++i) {
+        const double* row = basis + static_cast<size_t>(i) * n;
+        double sum = 0.0;
+        for (int k = 0; k < n; ++k) sum += data[k * step] * row[k];
+        tmp[i] = sum;
     }
-    for (int n = 0; n < N; ++n) data[n * step] = static_cast<float>(tmp[n]);
+    for (int i = 0; i < n; ++i) data[i * step] = static_cast<float>(tmp[i]);
 }
 
-Block dct2d(const Block& input) {
-    Block out = input;
+void dct2d(const DctPlan& plan, Block& block) {
+    const int n = plan.size();
 
-    // Применяем 1D ДКП к каждой строке блока (шаг = 1 внутри строки).
-    for (int row = 0; row < N; ++row) {
-        dct1d(&out[row * N], 1);
-    }
-    // Применяем 1D ДКП к каждому столбцу (шаг = N между строками).
-    for (int col = 0; col < N; ++col) {
-        dct1d(&out[col], N);
-    }
-    return out;
+    // 1D ДКП по каждой строке (шаг = 1 внутри строки).
+    for (int row = 0; row < n; ++row) dct1d(plan, &block[static_cast<size_t>(row) * n], 1);
+    // 1D ДКП по каждому столбцу (шаг = n между строками).
+    for (int col = 0; col < n; ++col) dct1d(plan, &block[col], n);
 }
 
-Block idct2d(const Block& dct_coeffs) {
-    Block out = dct_coeffs;
+void idct2d(const DctPlan& plan, Block& block) {
+    const int n = plan.size();
 
     // Обратное ДКП: сначала по столбцам, затем по строкам (обратный порядок).
-    for (int col = 0; col < N; ++col) {
-        idct1d(&out[col], N);
-    }
-    for (int row = 0; row < N; ++row) {
-        idct1d(&out[row * N], 1);
-    }
-    return out;
+    for (int col = 0; col < n; ++col) idct1d(plan, &block[col], n);
+    for (int row = 0; row < n; ++row) idct1d(plan, &block[static_cast<size_t>(row) * n], 1);
 }
 
 } // namespace jpeg

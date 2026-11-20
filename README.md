@@ -39,12 +39,18 @@ jpeg-converter/
   main.cpp                    -- точка входа, запуск бенчмарков
   README.md
 
+  experiments/
+    experiment_runner.cpp     -- замеры по сетке (размер картинки x размер блока x потоки)
+    run_experiments.py        -- серия прогонов с паузами, сырые CSV в experiments/raw/
+    plot_results.py           -- усреднение прогонов и графики в experiments/plots/
+    requirements.txt          -- зависимости для Python-скриптов
+
   include/jpeg/
-    image.h                   -- структура Image, тип Block (8x8 float)
+    image.h                   -- структура Image, тип Block (N x N float)
     color_converter.h         -- RGB <-> YCbCr
-    dct.h                     -- 2D DCT-II / IDCT
+    dct.h                     -- 2D DCT-II / IDCT для блока N x N (DctPlan с таблицей косинусов)
     quantization.h            -- таблицы квантования JPEG, scale по качеству
-    block_processor.h         -- извлечение/запись 8x8 блоков, зигзаг
+    block_processor.h         -- извлечение/запись N x N блоков, зигзаг
     thread_pool.h             -- ThreadPool: mutex + condition_variable + thread
     jpeg_encoder.h            -- энкодер: sequential / parallel / pool варианты
     benchmark.h               -- генерация тестовых изображений, сценарии
@@ -92,6 +98,49 @@ cmake --build build -j$(nproc)
 > **Важно**: бенчмарки нужно запускать в **Release**-сборке.
 > В Debug-режиме оптимизации отключены — разница между Sequential и Parallel
 > будет существенно меньше из-за накладных расходов на вызов функций.
+
+---
+
+## Серии экспериментов
+
+Три параметра: число потоков (1-8 и 16), размер изображения (8x8 ... 2048x2048, степени двойки)
+и размер блока ДКП (4x4 ... 128x128, степени двойки; в стандартном JPEG блок 8x8).
+Сценарии: `dct_threads` (std::thread), `dct_pool` (ThreadPool), `color` (RGB -> YCbCr,
+от блока не зависит), `batch` (4 изображения через ThreadPool), `amdahl`, а также
+`sequential` — последовательная базовая линия.
+
+```bash
+cmake -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build cmake-build-release -j
+pip install -r experiments/requirements.txt
+
+# Проверка пайплайна на уменьшенной сетке (~1 минута, паузы отключены):
+python3 experiments/run_experiments.py --build-dir cmake-build-release --quick --runs 1 --out /tmp/quick
+
+# Быстрая серия (~15 минут): картинки 8/64/512/2048, блоки 8/16/64, потоки 1-8 и 16,
+# 5 прогонов, пауза 90 с между прогонами. batch считается без 2048x2048.
+python3 experiments/run_experiments.py --build-dir cmake-build-release --preset fast
+
+# Полная серия (много часов): 9 размеров картинки x 6 размеров блока, паузы 120 с / 15 с.
+python3 experiments/run_experiments.py --build-dir cmake-build-release
+# Если прервали — продолжить с того же места (с теми же параметрами):
+python3 experiments/run_experiments.py --build-dir cmake-build-release --preset fast --resume
+
+# Усреднить прогоны и построить графики:
+python3 experiments/plot_results.py
+```
+
+Результаты:
+
+- `experiments/raw/run_K/<сценарий>.csv` — сырые данные каждого прогона
+  (`scenario,image_size,block_size,threads,reps,time_ms`; `threads = 0` — последовательная версия,
+  `block_size = 0` — сценарий не зависит от блока). Короткие замеры повторяются внутри процесса,
+  пока сумма не достигнет 50 мс, `time_ms` — среднее по этим повторам.
+- `experiments/results/summary_<сценарий>.csv` — среднее и стандартное отклонение по прогонам.
+- `experiments/plots/<сценарий>/time_grid.png`, `speedup_grid.png` — по панели на размер картинки,
+  линия на размер блока; `by_size/` — то же отдельными файлами.
+
+Для честных замеров закройте тяжёлые программы, подключите питание и не трогайте ноутбук во время серии.
 
 ---
 

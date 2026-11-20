@@ -1,8 +1,10 @@
 #pragma once
 #include "image.h"
+#include "dct.h"
 #include "quantization.h"
 #include <chrono>
 #include <string>
+#include <vector>
 
 namespace jpeg {
 
@@ -18,7 +20,7 @@ struct RunResult {
 //
 // Этапы конвейера:
 //   1. RGB -> YCbCr (на каждый пиксель, embarrassingly parallel)
-//   2. Извлечение блоков 8x8 (блоки независимы)
+//   2. Извлечение блоков N x N (блоки независимы)
 //   3. Прямой ДКП (независим на блок, вычислительно тяжёлый)
 //   4. Квантование (независимо на блок)
 //   5. Деквантование + обратный ДКП (независимо на блок)
@@ -26,9 +28,13 @@ struct RunResult {
 //
 // Этап 7 (зигзаг-сканирование / энтропийное кодирование) вынесен отдельно
 // для демонстрации последовательного узкого места (закон Амдала).
+//
+// Размер блока N задаётся в конструкторе (по умолчанию 8, как в стандарте JPEG).
 class JpegEncoder {
 public:
-    explicit JpegEncoder(int quality = 50);
+    explicit JpegEncoder(int quality = 50, int block_size = 8);
+
+    int block_size() const noexcept { return block_size_; }
 
     // Все этапы выполняются последовательно в вызывающем потоке.
     RunResult encode_sequential(Image& img);
@@ -49,8 +55,11 @@ public:
 
 private:
     int        quality_;
+    int        block_size_;
     QuantTable luma_table_;
     QuantTable chroma_table_;
+    DctPlan    dct_plan_;               // базисные косинусы, только чтение — безопасно делить между потоками
+    std::vector<int> zigzag_order_;
 
     // Выполняет прямой ДКП, квантование, деквантование и обратный ДКП
     // для блок-строк в диапазоне [row_start, row_end).

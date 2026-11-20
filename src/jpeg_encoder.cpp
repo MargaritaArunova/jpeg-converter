@@ -15,27 +15,34 @@ namespace jpeg {
 
 using Clock = std::chrono::high_resolution_clock;
 
-JpegEncoder::JpegEncoder(int quality)
+JpegEncoder::JpegEncoder(int quality, int block_size)
     : quality_(quality),
-      luma_table_(scale_quant_table(LUMA_QUANT_TABLE, quality)),
-      chroma_table_(scale_quant_table(CHROMA_QUANT_TABLE, quality)) {}
+      block_size_(block_size),
+      luma_table_(scale_quant_table(LUMA_QUANT_TABLE, quality, block_size)),
+      chroma_table_(scale_quant_table(CHROMA_QUANT_TABLE, quality, block_size)),
+      dct_plan_(block_size),
+      zigzag_order_(make_zigzag_order(block_size)) {}
 
 // Запускает полный DCT-конвейер для блок-строк [row_start, row_end) по всем каналам.
 // Является единицей параллелизма: разные диапазоны строк не пересекаются по данным.
 void JpegEncoder::process_block_range(Image& img, int row_start, int row_end) {
-    const int bcols = num_blocks(img.width);
+    const int n     = block_size_;
+    const int bcols = num_blocks(img.width, n);
+
+    // Рабочий буфер у каждого вызова свой (локальный), поэтому потоки не делят изменяемых данных.
+    Block block(static_cast<size_t>(n) * n);
 
     for (int br = row_start; br < row_end; ++br) {
         for (int bc = 0; bc < bcols; ++bc) {
             for (int ch = 0; ch < img.channels; ++ch) {
                 const QuantTable& qt = (ch == 0) ? luma_table_ : chroma_table_;
 
-                Block spatial = extract_block(img, br, bc, ch);
-                Block freq    = dct2d(spatial);
-                Block quant   = quantize(freq, qt);
-                Block dequant = dequantize(quant, qt);
-                Block recon   = idct2d(dequant);
-                write_block(img, br, bc, ch, recon);
+                extract_block(img, br, bc, ch, n, block);
+                dct2d(dct_plan_, block);
+                quantize(block, qt);
+                dequantize(block, qt);
+                idct2d(dct_plan_, block);
+                write_block(img, br, bc, ch, n, block);
             }
         }
     }
@@ -47,7 +54,7 @@ RunResult JpegEncoder::encode_sequential(Image& img) {
     auto t0 = Clock::now();
 
     rgb_to_ycbcr_sequential(img);
-    process_block_range(img, 0, num_blocks(img.height));
+    process_block_range(img, 0, num_blocks(img.height, block_size_));
     ycbcr_to_rgb_sequential(img);
 
     double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -62,7 +69,7 @@ RunResult JpegEncoder::encode_sequential(Image& img) {
 // std::atomic<int> считает завершённые задачи без блокировки (демонстрация атомарных операций).
 
 RunResult JpegEncoder::encode_parallel_threads(Image& img, int num_threads) {
-    const int brows = num_blocks(img.height);
+    const int brows = num_blocks(img.height, block_size_);
     num_threads = std::max(1, std::min(num_threads, brows));
 
     auto t0 = Clock::now();
@@ -101,7 +108,7 @@ RunResult JpegEncoder::encode_parallel_threads(Image& img, int num_threads) {
 // std::future<void> собираются, чтобы вызывающий мог дождаться всех задач.
 
 RunResult JpegEncoder::encode_with_pool(Image& img, int num_threads) {
-    const int brows = num_blocks(img.height);
+    const int brows = num_blocks(img.height, block_size_);
 
     auto t0 = Clock::now();
 
@@ -130,7 +137,7 @@ RunResult JpegEncoder::encode_with_pool(Image& img, int num_threads) {
 // --- Только преобразование цвета параллельно (изолированное измерение) ---
 
 RunResult JpegEncoder::encode_parallel_color_only(Image& img, int num_threads) {
-    const int brows = num_blocks(img.height);
+    const int brows = num_blocks(img.height, block_size_);
 
     auto t0 = Clock::now();
 
@@ -149,8 +156,8 @@ RunResult JpegEncoder::encode_parallel_color_only(Image& img, int num_threads) {
 // Даже при бесконечном числе потоков закон Амдала ограничивает ускорение: 1/0.2 = 5x.
 
 RunResult JpegEncoder::encode_amdahl_demo(Image& img, int num_threads) {
-    const int brows = num_blocks(img.height);
-    const int bcols = num_blocks(img.width);
+    const int brows = num_blocks(img.height, block_size_);
+    const int bcols = num_blocks(img.width, block_size_);
 
     auto t0 = Clock::now();
 
@@ -175,16 +182,22 @@ RunResult JpegEncoder::encode_amdahl_demo(Image& img, int num_threads) {
     // Последовательная часть: зигзаг-сканирование каждого восстановленного блока.
     // Нельзя распараллелить: в реальном кодировщике Хаффмана каждый символ зависит
     // от предыдущего (carry между блоками при арифметическом кодировании).
-    for (int br = 0; br < brows; ++br) {
-        for (int bc = 0; bc < bcols; ++bc) {
-            for (int ch = 0; ch < img.channels; ++ch) {
-                Block blk = extract_block(img, br, bc, ch);
-                // Результат сканирования намеренно не используется —
-                // в реальном кодировщике он поступил бы на вход Хаффмана.
-                volatile auto scan = zigzag_scan(blk);
-                (void)scan;
+    {
+        const int n = block_size_;
+        Block blk(static_cast<size_t>(n) * n);
+        std::vector<int16_t> scan(static_cast<size_t>(n) * n);
+        for (int br = 0; br < brows; ++br) {
+            for (int bc = 0; bc < bcols; ++bc) {
+                for (int ch = 0; ch < img.channels; ++ch) {
+                    extract_block(img, br, bc, ch, n, blk);
+                    zigzag_scan(blk, zigzag_order_, scan);
+                }
             }
         }
+        // Результат сканирования намеренно не используется —
+        // в реальном кодировщике он поступил бы на вход Хаффмана.
+        volatile int16_t sink = scan[0];
+        (void)sink;
     }
 
     ycbcr_to_rgb_parallel(img, num_threads);

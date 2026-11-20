@@ -26,6 +26,11 @@ add_executable(jpeg_converter main.cpp ${SOURCES})
 
 target_include_directories(jpeg_converter PRIVATE include)
 
+# Раннер для серий экспериментов (см. experiments/run_experiments.py).
+add_executable(experiment_runner experiments/experiment_runner.cpp ${SOURCES})
+target_include_directories(experiment_runner PRIVATE include)
+
 # Link pthreads on Linux; on macOS threads are part of libc.
 find_package(Threads REQUIRED)
 target_link_libraries(jpeg_converter Threads::Threads)
+target_link_libraries(experiment_runner Threads::Threads)

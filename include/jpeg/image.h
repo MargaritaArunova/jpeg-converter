@@ -31,7 +31,8 @@ struct Image {
     int pixel_count() const noexcept { return width * height; }
 };
 
-// Блок 8x8 вещественных коэффициентов — базовая единица JPEG-конвейера.
-using Block = std::array<float, 64>;
+// Блок N x N вещественных значений (row-major) — базовая единица JPEG-конвейера.
+// Размер N выбирается при создании блока; в стандартном JPEG N = 8.
+using Block = std::vector<float>;
 
 } // namespace jpeg

@@ -1,0 +1,13 @@
+scenario,image_size,block_size,threads,reps,time_ms
+sequential,8,8,0,20,0.00866345
+sequential,8,16,0,20,0.051464
+sequential,8,64,0,15,3.46868
+sequential,64,8,0,20,0.531571
+sequential,64,16,0,20,0.902104
+sequential,64,64,0,14,3.57814
+sequential,512,8,0,2,34.0904
+sequential,512,16,0,1,57.8328
+sequential,512,64,0,1,228.597
+sequential,2048,8,0,1,564.575
+sequential,2048,16,0,1,928.939
+sequential,2048,64,0,1,3672.06
